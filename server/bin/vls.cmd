@@ -9,7 +9,7 @@ IF EXIST "%dp0%\node.exe" (
   SET PATHEXT=%PATHEXT:;.JS;=;%
 )
 
-"%_prog%"  "%dp0%\server\bin\vls" %*
+"%_prog%"  "%dp0%\vls" %*
 ENDLOCAL
 EXIT /b %errorlevel%
 :find_dp0
