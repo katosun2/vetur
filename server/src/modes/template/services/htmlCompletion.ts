@@ -1,14 +1,13 @@
 import {
-  TextDocument,
   Position,
   CompletionList,
   CompletionItemKind,
   Range,
   TextEdit,
   InsertTextFormat,
-  CompletionItem,
-  MarkupKind
+  CompletionItem
 } from 'vscode-languageserver-types';
+import type { TextDocument } from 'vscode-languageserver-textdocument';
 import { HTMLDocument } from '../parser/htmlParser';
 import { TokenType, createScanner, ScannerState } from '../parser/htmlScanner';
 import { IHTMLTagProvider } from '../tagProviders';
@@ -16,13 +15,15 @@ import * as emmet from 'vscode-emmet-helper';
 import { NULL_COMPLETION } from '../../nullMode';
 import { getModifierProvider, Modifier } from '../modifierProvider';
 import { toMarkupContent } from '../../../utils/strings';
+import { Priority } from '../tagProviders/common';
 
 export function doComplete(
   document: TextDocument,
   position: Position,
   htmlDocument: HTMLDocument,
   tagProviders: IHTMLTagProvider[],
-  emmetConfig: emmet.EmmetConfiguration
+  emmetConfig: emmet.VSCodeEmmetConfig,
+  autoImportCompletions?: CompletionItem[]
 ): CompletionList {
   const modifierProvider = getModifierProvider();
 
@@ -62,6 +63,15 @@ export function doComplete(
           sortText: priority + tag,
           insertTextFormat: InsertTextFormat.PlainText
         });
+      });
+    });
+    autoImportCompletions?.forEach(item => {
+      result.items.push({
+        ...item,
+        kind: CompletionItemKind.Property,
+        textEdit: TextEdit.replace(range, item.label),
+        sortText: Priority.UserCode + item.label,
+        insertTextFormat: InsertTextFormat.PlainText
       });
     });
     return result;
@@ -154,6 +164,9 @@ export function doComplete(
         let codeSnippet = attribute;
         if (type !== 'v' && value.length) {
           codeSnippet = codeSnippet + value;
+        }
+        if ((filterPrefix === ':' && codeSnippet[0] === ':') || (filterPrefix === '@' && codeSnippet[0] === '@')) {
+          codeSnippet = codeSnippet.slice(1);
         }
         result.items.push({
           label: attribute,

@@ -1,11 +1,12 @@
-import { TextDocument, Position, Range } from 'vscode-languageserver-types';
+import { Diagnostic, Position, Range } from 'vscode-languageserver-types';
+import type { TextDocument } from 'vscode-languageserver-textdocument';
 import {
   getCSSLanguageService,
   getSCSSLanguageService,
   getLESSLanguageService,
   LanguageService
 } from 'vscode-css-languageservice';
-import * as _ from 'lodash';
+import _ from 'lodash';
 import * as emmet from 'vscode-emmet-helper';
 
 import { Priority } from './emmet';
@@ -14,33 +15,47 @@ import { LanguageMode } from '../../embeddedSupport/languageModes';
 import { VueDocumentRegions, LanguageId } from '../../embeddedSupport/embeddedSupport';
 import { getFileFsPath } from '../../utils/paths';
 import { prettierify } from '../../utils/prettier';
-import { ParserOption } from '../../utils/prettier/prettier.d';
 import { NULL_HOVER } from '../nullMode';
 import { VLSFormatConfig } from '../../config';
+import { DependencyService } from '../../services/dependencyService';
+import { BuiltInParserName } from 'prettier';
 
-export function getCSSMode(documentRegions: LanguageModelCache<VueDocumentRegions>): LanguageMode {
+export function getCSSMode(
+  documentRegions: LanguageModelCache<VueDocumentRegions>,
+  dependencyService: DependencyService
+): LanguageMode {
   const languageService = getCSSLanguageService();
-  return getStyleMode('css', languageService, documentRegions);
+  return getStyleMode('css', languageService, documentRegions, dependencyService);
 }
 
-export function getPostCSSMode(documentRegions: LanguageModelCache<VueDocumentRegions>): LanguageMode {
+export function getPostCSSMode(
+  documentRegions: LanguageModelCache<VueDocumentRegions>,
+  dependencyService: DependencyService
+): LanguageMode {
   const languageService = getCSSLanguageService();
-  return getStyleMode('postcss', languageService, documentRegions);
+  return getStyleMode('postcss', languageService, documentRegions, dependencyService);
 }
 
-export function getSCSSMode(documentRegions: LanguageModelCache<VueDocumentRegions>): LanguageMode {
+export function getSCSSMode(
+  documentRegions: LanguageModelCache<VueDocumentRegions>,
+  dependencyService: DependencyService
+): LanguageMode {
   const languageService = getSCSSLanguageService();
-  return getStyleMode('scss', languageService, documentRegions);
+  return getStyleMode('scss', languageService, documentRegions, dependencyService);
 }
-export function getLESSMode(documentRegions: LanguageModelCache<VueDocumentRegions>): LanguageMode {
+export function getLESSMode(
+  documentRegions: LanguageModelCache<VueDocumentRegions>,
+  dependencyService: DependencyService
+): LanguageMode {
   const languageService = getLESSLanguageService();
-  return getStyleMode('less', languageService, documentRegions);
+  return getStyleMode('less', languageService, documentRegions, dependencyService);
 }
 
 function getStyleMode(
   languageId: LanguageId,
   languageService: LanguageService,
-  documentRegions: LanguageModelCache<VueDocumentRegions>
+  documentRegions: LanguageModelCache<VueDocumentRegions>,
+  dependencyService: DependencyService
 ): LanguageMode {
   const embeddedDocuments = getLanguageModelCache(10, 60, document =>
     documentRegions.refreshAndGet(document).getSingleLanguageDocument(languageId)
@@ -56,12 +71,12 @@ function getStyleMode(
       languageService.configure(c && c.css);
       config = c;
     },
-    doValidation(document) {
+    async doValidation(document) {
       if (languageId === 'postcss') {
         return [];
       } else {
         const embedded = embeddedDocuments.refreshAndGet(document);
-        return languageService.doValidation(embedded, stylesheets.refreshAndGet(embedded));
+        return languageService.doValidation(embedded, stylesheets.refreshAndGet(embedded)) as Diagnostic[];
       }
     },
     doComplete(document, position) {
@@ -136,13 +151,14 @@ function getStyleMode(
 
       const { value, range } = getValueAndRange(document, currRange);
       const needIndent = config.vetur.format.styleInitialIndent;
-      const parserMap: { [k: string]: ParserOption } = {
+      const parserMap: { [k: string]: BuiltInParserName } = {
         css: 'css',
         postcss: 'css',
         scss: 'scss',
         less: 'less'
       };
       return prettierify(
+        dependencyService,
         value,
         getFileFsPath(document.uri),
         range,

@@ -1,5 +1,5 @@
-import * as path from 'path';
-import { getFileFsPath } from '../utils/paths';
+import path from 'path';
+import { getFileFsPath, normalizeFileNameToFsPath } from '../utils/paths';
 
 import {
   DidChangeConfigurationParams,
@@ -7,7 +7,7 @@ import {
   DocumentFormattingParams,
   DocumentLinkParams,
   FileChangeType,
-  IConnection,
+  Connection,
   TextDocumentPositionParams,
   ColorPresentationParams,
   InitializeParams,
@@ -35,20 +35,19 @@ import {
   Location,
   SignatureHelp,
   SymbolInformation,
-  TextDocument,
-  TextDocumentChangeEvent,
   TextEdit,
   ColorPresentation,
   Range,
   FoldingRange
 } from 'vscode-languageserver-types';
+import type { TextDocument } from 'vscode-languageserver-textdocument';
 
 import { URI } from 'vscode-uri';
 import { LanguageModes, LanguageModeRange, LanguageMode } from '../embeddedSupport/languageModes';
 import { NULL_COMPLETION, NULL_HOVER, NULL_SIGNATURE } from '../modes/nullMode';
 import { VueInfoService } from './vueInfoService';
-import { DependencyService } from './dependencyService';
-import * as _ from 'lodash';
+import { createDependencyService, DependencyService } from './dependencyService';
+import _ from 'lodash';
 import { DocumentContext, RefactorAction } from '../types';
 import { DocumentService } from './documentService';
 import { VueHTMLMode } from '../modes/template';
@@ -56,7 +55,7 @@ import { logger } from '../log';
 import { getDefaultVLSConfig, VLSFullConfig, VLSConfig } from '../config';
 import { LanguageId } from '../embeddedSupport/embeddedSupport';
 import { APPLY_REFACTOR_COMMAND } from '../modes/script/javascript';
-import { EndOfLine } from 'vscode';
+import { VCancellationToken, VCancellationTokenSource } from '../utils/cancellationToken';
 
 export class VLS {
   // @Todo: Remove this and DocumentContext
@@ -69,6 +68,7 @@ export class VLS {
   private languageModes: LanguageModes;
 
   private pendingValidationRequests: { [uri: string]: NodeJS.Timer } = {};
+  private cancellationTokenValidationRequests: { [uri: string]: VCancellationTokenSource } = {};
   private validationDelayMs = 200;
   private validation: { [k: string]: boolean } = {
     'vue-html': true,
@@ -83,18 +83,18 @@ export class VLS {
 
   private documentFormatterRegistration: Disposable | undefined;
 
-  constructor(private lspConnection: IConnection) {
+  private config: VLSFullConfig;
+
+  constructor(private lspConnection: Connection) {
     this.documentService = new DocumentService(this.lspConnection);
     this.vueInfoService = new VueInfoService();
-    this.dependencyService = new DependencyService();
+    this.dependencyService = createDependencyService();
 
     this.languageModes = new LanguageModes();
   }
 
   async init(params: InitializeParams) {
-    const config: VLSFullConfig = params.initializationOptions?.config
-      ? _.merge(getDefaultVLSConfig(), params.initializationOptions.config)
-      : getDefaultVLSConfig();
+    const config = this.getFullConfig(params.initializationOptions?.config);
 
     const workspacePath = params.rootPath;
     if (!workspacePath) {
@@ -104,13 +104,17 @@ export class VLS {
       };
     }
 
-    this.workspacePath = workspacePath;
+    this.workspacePath = normalizeFileNameToFsPath(workspacePath);
 
-    await this.vueInfoService.init(this.languageModes);
-    await this.dependencyService.init(workspacePath, config.vetur.useWorkspaceDependencies, config.typescript.tsdk);
+    this.vueInfoService.init(this.languageModes);
+    await this.dependencyService.init(
+      this.workspacePath,
+      config.vetur.useWorkspaceDependencies,
+      config.typescript.tsdk
+    );
 
     await this.languageModes.init(
-      workspacePath,
+      this.workspacePath,
       {
         infoService: this.vueInfoService,
         dependencyService: this.dependencyService
@@ -118,6 +122,7 @@ export class VLS {
       params.initializationOptions?.globalSnippetDir
     );
 
+    this.configure(config);
     this.setupConfigListeners();
     this.setupLSPHandlers();
     this.setupCustomLSPHandlers();
@@ -126,22 +131,21 @@ export class VLS {
     this.lspConnection.onShutdown(() => {
       this.dispose();
     });
-
-    this.configure(config);
   }
 
   listen() {
     this.lspConnection.listen();
   }
 
+  private getFullConfig(config: any | undefined): VLSFullConfig {
+    return config ? _.merge(getDefaultVLSConfig(), config) : getDefaultVLSConfig();
+  }
+
   private setupConfigListeners() {
     this.lspConnection.onDidChangeConfiguration(async ({ settings }: DidChangeConfigurationParams) => {
-      if (settings) {
-        this.configure(settings);
-
-        // onDidChangeConfiguration will fire for Language Server startup
-        await this.setupDynamicFormatters(settings);
-      }
+      const config = this.getFullConfig(settings);
+      this.configure(config);
+      this.setupDynamicFormatters(config);
     });
 
     this.documentService.getAllDocuments().forEach(this.triggerValidation);
@@ -173,20 +177,21 @@ export class VLS {
       return (this.languageModes.getMode('vue-html') as VueHTMLMode).queryVirtualFileInfo(fileName, currFileText);
     });
 
-    this.lspConnection.onRequest('$/getDiagnostics', params => {
+    this.lspConnection.onRequest('$/getDiagnostics', async params => {
       const doc = this.documentService.getDocument(params.uri);
       if (doc) {
-        return this.doValidate(doc);
+        const diagnostics = await this.doValidate(doc);
+        return diagnostics ?? [];
       }
       return [];
     });
   }
 
-  private async setupDynamicFormatters(settings: any) {
-    if (settings.vetur.format.enable === true) {
+  private async setupDynamicFormatters(settings: VLSFullConfig) {
+    if (settings.vetur.format.enable) {
       if (!this.documentFormatterRegistration) {
         this.documentFormatterRegistration = await this.lspConnection.client.register(DocumentFormattingRequest.type, {
-          documentSelector: ['vue']
+          documentSelector: [{ language: 'vue' }]
         });
       }
     } else {
@@ -197,7 +202,7 @@ export class VLS {
   }
 
   private setupFileChangeListeners() {
-    this.documentService.onDidChangeContent((change: TextDocumentChangeEvent) => {
+    this.documentService.onDidChangeContent(change => {
       this.triggerValidation(change.document);
     });
     this.documentService.onDidClose(e => {
@@ -224,6 +229,8 @@ export class VLS {
   }
 
   configure(config: VLSConfig): void {
+    this.config = config;
+
     const veturValidationOptions = config.vetur.validation;
     this.validation['vue-html'] = veturValidationOptions.template;
     this.validation.css = veturValidationOptions.style;
@@ -309,17 +316,6 @@ export class VLS {
         context &&
         context?.triggerKind === CompletionTriggerKind.TriggerCharacter &&
         context.triggerCharacter === ' '
-      ) {
-        return NULL_COMPLETION;
-      }
-
-      /**
-       * Do not use `'` and `"` as trigger character in js/ts mode
-       */
-      if (
-        mode.getId() === 'javascript' &&
-        context?.triggerKind === CompletionTriggerKind.TriggerCharacter &&
-        context.triggerCharacter?.match(/['"]/)
       ) {
         return NULL_COMPLETION;
       }
@@ -486,6 +482,10 @@ export class VLS {
   }
 
   onCodeAction({ textDocument, range, context }: CodeActionParams) {
+    if (!this.config.vetur.languageFeatures.codeActions) {
+      return [];
+    }
+
     const doc = this.documentService.getDocument(textDocument.uri)!;
     const mode = this.languageModes.getModeAtPosition(doc, range.start);
     if (this.languageModes.getModeAtPosition(doc, range.end) !== mode) {
@@ -514,10 +514,22 @@ export class VLS {
     }
 
     this.cleanPendingValidation(textDocument);
+    this.cancelPastValidation(textDocument);
     this.pendingValidationRequests[textDocument.uri] = setTimeout(() => {
       delete this.pendingValidationRequests[textDocument.uri];
-      this.validateTextDocument(textDocument);
+      const tsDep = this.dependencyService.get('typescript');
+      this.cancellationTokenValidationRequests[textDocument.uri] = new VCancellationTokenSource(tsDep.module);
+      this.validateTextDocument(textDocument, this.cancellationTokenValidationRequests[textDocument.uri].token);
     }, this.validationDelayMs);
+  }
+
+  cancelPastValidation(textDocument: TextDocument): void {
+    const source = this.cancellationTokenValidationRequests[textDocument.uri];
+    if (source) {
+      source.cancel();
+      source.dispose();
+      delete this.cancellationTokenValidationRequests[textDocument.uri];
+    }
   }
 
   cleanPendingValidation(textDocument: TextDocument): void {
@@ -528,25 +540,30 @@ export class VLS {
     }
   }
 
-  validateTextDocument(textDocument: TextDocument): void {
-    const diagnostics: Diagnostic[] = this.doValidate(textDocument);
-    this.lspConnection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
+  async validateTextDocument(textDocument: TextDocument, cancellationToken?: VCancellationToken) {
+    const diagnostics = await this.doValidate(textDocument, cancellationToken);
+    if (diagnostics) {
+      this.lspConnection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
+    }
   }
 
-  doValidate(doc: TextDocument): Diagnostic[] {
+  async doValidate(doc: TextDocument, cancellationToken?: VCancellationToken) {
     const diagnostics: Diagnostic[] = [];
     if (doc.languageId === 'vue') {
-      this.languageModes.getAllLanguageModeRangesInDocument(doc).forEach(lmr => {
+      for (const lmr of this.languageModes.getAllLanguageModeRangesInDocument(doc)) {
         if (lmr.mode.doValidation) {
           if (this.validation[lmr.mode.getId()]) {
-            pushAll(diagnostics, lmr.mode.doValidation(doc));
+            pushAll(diagnostics, await lmr.mode.doValidation(doc, cancellationToken));
           }
           // Special case for template type checking
           else if (lmr.mode.getId() === 'vue-html' && this.templateInterpolationValidation) {
-            pushAll(diagnostics, lmr.mode.doValidation(doc));
+            pushAll(diagnostics, await lmr.mode.doValidation(doc, cancellationToken));
           }
         }
-      });
+      }
+    }
+    if (cancellationToken?.isCancellationRequested) {
+      return null;
     }
     return diagnostics;
   }
@@ -573,7 +590,7 @@ export class VLS {
 
   get capabilities(): ServerCapabilities {
     return {
-      textDocumentSync: TextDocumentSyncKind.Full,
+      textDocumentSync: TextDocumentSyncKind.Incremental,
       completionProvider: { resolveProvider: true, triggerCharacters: ['.', ':', '<', '"', "'", '/', '@', '*', ' '] },
       signatureHelpProvider: { triggerCharacters: ['('] },
       documentFormattingProvider: false,

@@ -1,5 +1,17 @@
 # FAQ
 
+- [Install an old version of Vetur](#install-an-old-version-of-vetur)
+- [No Syntax Highlighting & No Language Features working](#no-syntax-highlighting--no-language-features-working)
+- [Vetur Crash](#vetur-crash)
+- [Vetur can't recognize components imported using webpack's alias](#vetur-cant-recognize-components-imported-using-webpacks-alias)
+- [Property 'xxx' does not exist on type 'CombinedVueInstance'](#property-xxx-does-not-exist-on-type-combinedvueinstance)
+- [Vetur cannot recognize my Vue component import, such as `import Comp from './comp'`](#vetur-cannot-recognize-my-vue-component-import-such-as-import-comp-from-comp)
+- [Template Interpolation auto completion does not work](#template-interpolation-auto-completion-does-not-work)
+- [.vue file cannot be imported in TS file](#vue-file-cannot-be-imported-in-ts-file)
+- [How to build and install from source](#how-to-build-and-install-from-source)
+- [Vetur uses different version of TypeScript in .vue files to what I installed in `node_modules`.](#vetur-uses-different-version-of-typescript-in-vue-files-to-what-i-installed-in-node_modules)
+- [Vetur is slow](#vetur-is-slow)
+
 ## Install an old version of Vetur
 
 Sometimes new releases have bugs that you want to avoid. Here's an easy way to downgrade Vetur to a working version:
@@ -67,9 +79,22 @@ For 2, try these methods:
   }
   ```
 
-## Template errors in components written in Javascript
+## `Property 'xxx' does not exist on type 'CombinedVueInstance'`
 
-If you have `vetur.validation.interpolation` enabled and are getting a lot of "Property 'xxx' does not exist on type 'CombinedVueInstance'" errors, it might be due to Typescript not being able to infer types properly. In Javascript-based code base, Typescript does a lot of guessing to infer types properly but it's not always able to do that automatically. You might have to add type annotations manually in the script section. Read more about the issue here: [#1707 (comment)](https://github.com/vuejs/vetur/issues/1707#issuecomment-686851677). Also, check [how to add JSDoc annotations](https://www.typescriptlang.org/docs/handbook/jsdoc-supported-types.html).
+If you are getting a lot of `Property 'xxx' does not exist on type 'CombinedVueInstance'` errors, it's an issue with Vue's typing and TypeScript.
+
+Related issues: [vuejs/vue#8721](https://github.com/vuejs/vue/issues/8721), [vuejs/vue#9873](https://github.com/vuejs/vue/issues/9873) and [microsoft/TypeScript#30854](https://github.com/microsoft/TypeScript/issues/30854).
+
+You can work around it by:
+
+- Annotating return type for each computed property, by either [adding JSDoc](https://github.com/vuejs/vetur/issues/1707#issuecomment-686851677) or [TS types](https://vuejs.org/v2/guide/typescript.html#Annotating-Return-Types).
+- Setting `vetur.validation.interpolation: false`. You'll not get any template error checking.
+- Downgrading TS to a version before 3.4 and enabling `vetur.useWorkspaceDependencies`. You'll not get support for new TS syntaxes, such as optional chaining.
+- Use [Composition API](https://composition-api.vuejs.org).
+
+## Template Interpolation auto completion does not work
+
+You are running into the same issue as above — not typing return type of `computed`. Please add [JSDoc](https://github.com/vuejs/vetur/issues/1707#issuecomment-686851677) or [TS types](https://vuejs.org/v2/guide/typescript.html#Annotating-Return-Types) for computed properties.
 
 ## Vetur cannot recognize my Vue component import, such as `import Comp from './comp'`
 
@@ -77,11 +102,11 @@ If you have `vetur.validation.interpolation` enabled and are getting a lot of "P
 
 More details at: https://github.com/vuejs/vetur/issues/423#issuecomment-340235722
 
-## .vue file cannot be imported in TS file.
+## .vue file cannot be imported in TS file
 
 You need to add `declare module '*.vue'` in your dts files: https://github.com/Microsoft/TypeScript-Vue-Starter#single-file-components.
 
-## Install from source.
+## How to build and install from source
 
 To build and install the extension from source, you need to install [`vsce`](https://code.visualstudio.com/docs/extensions/publish-extension).
 
@@ -101,3 +126,9 @@ Now you'll find `vetur-{version}.vsix`, you can install it by editor command "In
 
 You can enable `Vetur: Use Workspace Dependencies` setting so that it uses the same version of TypeScript in your workspace.
 NB: It will use `typescript.tsdk` setting as the path to look for if defined, defaulting to `node_modules/typescript`. This enables tools like Yarn PnP to set their own custom resolver.
+
+## Vetur is slow
+
+You can run the command `Vetur: Restart VLS (Vue Language Server)` to restart VLS.
+
+However, we'd appreciate it if you can file a [performance issue report with a profile](https://github.com/vuejs/vetur/blob/master/.github/PERF_ISSUE.md) to help us find the cause of the issue.

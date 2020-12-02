@@ -1,7 +1,8 @@
-import * as _ from 'lodash';
+import _ from 'lodash';
 
 import { LanguageModelCache, getLanguageModelCache } from '../../embeddedSupport/languageModelCache';
-import { TextDocument, Position, Range, FormattingOptions } from 'vscode-languageserver-types';
+import { Position, Range, FormattingOptions, CompletionItem } from 'vscode-languageserver-types';
+import type { TextDocument } from 'vscode-languageserver-textdocument';
 import { LanguageMode } from '../../embeddedSupport/languageModes';
 import { VueDocumentRegions } from '../../embeddedSupport/embeddedSupport';
 import { HTMLDocument } from './parser/htmlParser';
@@ -26,6 +27,9 @@ import { getComponentInfoTagProvider } from './tagProviders/componentInfoTagProv
 import { VueVersion } from '../../services/typescriptService/vueVersion';
 import { doPropValidation } from './services/vuePropValidation';
 import { getFoldingRanges } from './services/htmlFolding';
+import { DependencyService } from '../../services/dependencyService';
+import { isVCancellationRequested, VCancellationToken } from '../../utils/cancellationToken';
+import { AutoImportVueService } from '../../services/autoImportVueService';
 
 export class HTMLMode implements LanguageMode {
   private tagProviderSettings: CompletionConfiguration;
@@ -40,7 +44,9 @@ export class HTMLMode implements LanguageMode {
     documentRegions: LanguageModelCache<VueDocumentRegions>,
     workspacePath: string | undefined,
     vueVersion: VueVersion,
+    private dependencyService: DependencyService,
     private vueDocuments: LanguageModelCache<HTMLDocument>,
+    private autoImportVueService: AutoImportVueService,
     private vueInfoService?: VueInfoService
   ) {
     this.tagProviderSettings = getTagProviderSettings(workspacePath);
@@ -58,11 +64,15 @@ export class HTMLMode implements LanguageMode {
   configure(c: VLSFullConfig) {
     this.enabledTagProviders = getEnabledTagProviders(this.tagProviderSettings);
     this.config = c;
+    this.autoImportVueService.setGetConfigure(() => c);
   }
 
-  doValidation(document: TextDocument) {
+  async doValidation(document: TextDocument, cancellationToken?: VCancellationToken) {
     const diagnostics = [];
 
+    if (await isVCancellationRequested(cancellationToken)) {
+      return [];
+    }
     if (this.config.vetur.validation.templateProps) {
       const info = this.vueInfoService ? this.vueInfoService.getInfo(document) : undefined;
       if (info && info.componentInfo.childComponents) {
@@ -70,9 +80,12 @@ export class HTMLMode implements LanguageMode {
       }
     }
 
+    if (await isVCancellationRequested(cancellationToken)) {
+      return diagnostics;
+    }
     if (this.config.vetur.validation.template) {
       const embedded = this.embeddedDocuments.refreshAndGet(document);
-      diagnostics.push(...doESLintValidation(embedded, this.lintEngine));
+      diagnostics.push(...(await doESLintValidation(embedded, this.lintEngine)));
     }
 
     return diagnostics;
@@ -86,7 +99,14 @@ export class HTMLMode implements LanguageMode {
       tagProviders.push(getComponentInfoTagProvider(info.componentInfo.childComponents));
     }
 
-    return doComplete(embedded, position, this.vueDocuments.refreshAndGet(embedded), tagProviders, this.config.emmet);
+    return doComplete(
+      embedded,
+      position,
+      this.vueDocuments.refreshAndGet(embedded),
+      tagProviders,
+      this.config.emmet,
+      this.autoImportVueService.doComplete(document)
+    );
   }
   doHover(document: TextDocument, position: Position) {
     const embedded = this.embeddedDocuments.refreshAndGet(document);
@@ -104,7 +124,7 @@ export class HTMLMode implements LanguageMode {
     return findDocumentSymbols(document, this.vueDocuments.refreshAndGet(document));
   }
   format(document: TextDocument, range: Range, formattingOptions: FormattingOptions) {
-    return htmlFormat(document, range, this.config.vetur.format as VLSFormatConfig);
+    return htmlFormat(this.dependencyService, document, range, this.config.vetur.format as VLSFormatConfig);
   }
   findDefinition(document: TextDocument, position: Position) {
     const embedded = this.embeddedDocuments.refreshAndGet(document);

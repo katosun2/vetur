@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+import vscode from 'vscode';
 import { sameLineRange } from '../../../util';
 import { testDiagnostics, testNoDiagnostics } from '../../../diagnosticHelper';
 import { getDocUri } from '../../path';
@@ -260,7 +260,11 @@ describe('Should find template-diagnostics in <template> region', () => {
     'hyphen-attrs.vue',
     'template-literal.vue',
     'no-implicit-any-parameters.vue',
-    'no-implicit-any-v-for-array.vue'
+    'no-implicit-any-v-for-array.vue',
+    'issue-1745-duplicate-event-with-modifiers.vue',
+    'issue-2254.vue',
+    'issue-2258.vue',
+    'optional-in-template.vue'
   ];
 
   noErrorTests.forEach(t => {

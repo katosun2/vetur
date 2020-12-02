@@ -1,5 +1,5 @@
-import * as vscode from 'vscode';
-import { LanguageClient, WorkspaceEdit } from 'vscode-languageclient';
+import vscode from 'vscode';
+import { LanguageClient } from 'vscode-languageclient';
 import { generateGrammarCommandHandler } from './commands/generateGrammarCommand';
 import { registerLanguageConfigurations } from './languages';
 import { initializeLanguageClient } from './client';
@@ -53,17 +53,35 @@ export async function activate(context: vscode.ExtensionContext) {
     .then(() => {
       registerCustomClientNotificationHandlers(client);
       registerCustomLSPCommands(context, client);
+      registerRestartVLSCommand(context, client);
     })
     .catch(e => {
       console.log('Client initialization failed');
     });
 
+  return displayInitProgress(promise);
+}
+
+async function displayInitProgress(promise: Promise<void>) {
   return vscode.window.withProgress(
     {
       title: 'Vetur initialization',
       location: vscode.ProgressLocation.Window
     },
     () => promise
+  );
+}
+
+function registerRestartVLSCommand(context: vscode.ExtensionContext, client: LanguageClient) {
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vetur.restartVLS', () =>
+      displayInitProgress(
+        client
+          .stop()
+          .then(() => client.start())
+          .then(() => client.onReady())
+      )
+    )
   );
 }
 

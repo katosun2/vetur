@@ -4,9 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import * as assert from 'assert';
+import assert from 'assert';
 
-import { TextDocument, SymbolInformation, SymbolKind, Location, Range } from 'vscode-languageserver-types';
+import { SymbolInformation, SymbolKind, Location, Range } from 'vscode-languageserver-types';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import { parseHTMLDocument } from '../parser/htmlParser';
 import { findDocumentSymbols } from '../services/htmlSymbolsProvider';
 

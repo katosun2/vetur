@@ -1,42 +1,45 @@
-import { LanguageMode } from '../../embeddedSupport/languageModes';
 import {
-  Diagnostic,
-  TextDocument,
-  DiagnosticSeverity,
-  Position,
-  MarkedString,
-  Range,
-  Location,
-  Definition,
-  CompletionList,
-  TextEdit,
   CompletionItem,
-  MarkupContent
+  CompletionList,
+  Definition,
+  Diagnostic,
+  DiagnosticSeverity,
+  Location,
+  MarkedString,
+  MarkupContent,
+  Position,
+  Range,
+  TextEdit
 } from 'vscode-languageserver-types';
-import { IServiceHost } from '../../services/typescriptService/serviceHost';
-import { languageServiceIncludesFile } from '../script/javascript';
-import { getFileFsPath } from '../../utils/paths';
-import { mapBackRange, mapFromPositionToOffset } from '../../services/typescriptService/sourceMap';
 import { URI } from 'vscode-uri';
-import * as ts from 'typescript';
-import { T_TypeScript } from '../../services/dependencyService';
-import * as _ from 'lodash';
-import { createTemplateDiagnosticFilter } from '../../services/typescriptService/templateDiagnosticFilter';
-import { NULL_COMPLETION } from '../nullMode';
-import { toCompletionItemKind } from '../../services/typescriptService/util';
+import { TextDocument } from 'vscode-languageserver-textdocument';
+import { VLSFullConfig } from '../../config';
 import { LanguageModelCache } from '../../embeddedSupport/languageModelCache';
+import { LanguageMode } from '../../embeddedSupport/languageModes';
+import { IServiceHost } from '../../services/typescriptService/serviceHost';
+import { mapBackRange, mapFromPositionToOffset } from '../../services/typescriptService/sourceMap';
+import type ts from 'typescript';
+import _ from 'lodash';
+import { createTemplateDiagnosticFilter } from '../../services/typescriptService/templateDiagnosticFilter';
+import { toCompletionItemKind } from '../../services/typescriptService/util';
+import { VueInfoService } from '../../services/vueInfoService';
+import { isVCancellationRequested, VCancellationToken } from '../../utils/cancellationToken';
+import { getFileFsPath } from '../../utils/paths';
+import { NULL_COMPLETION } from '../nullMode';
+import { languageServiceIncludesFile } from '../script/javascript';
+import * as Previewer from '../script/previewer';
 import { HTMLDocument } from './parser/htmlParser';
 import { isInsideInterpolation } from './services/isInsideInterpolation';
-import * as Previewer from '../script/previewer';
-import { VLSFullConfig } from '../../config';
+import { RuntimeLibrary } from '../../services/dependencyService';
 
 export class VueInterpolationMode implements LanguageMode {
   private config: VLSFullConfig;
 
   constructor(
-    private tsModule: T_TypeScript,
+    private tsModule: RuntimeLibrary['typescript'],
     private serviceHost: IServiceHost,
-    private vueDocuments: LanguageModelCache<HTMLDocument>
+    private vueDocuments: LanguageModelCache<HTMLDocument>,
+    private vueInfoService?: VueInfoService
   ) {}
 
   getId() {
@@ -51,11 +54,15 @@ export class VueInterpolationMode implements LanguageMode {
     return this.serviceHost.queryVirtualFileInfo(fileName, currFileText);
   }
 
-  doValidation(document: TextDocument): Diagnostic[] {
+  async doValidation(document: TextDocument, cancellationToken?: VCancellationToken): Promise<Diagnostic[]> {
     if (
       !_.get(this.config, ['vetur', 'experimental', 'templateInterpolationService'], true) ||
       !this.config.vetur.validation.interpolation
     ) {
+      return [];
+    }
+
+    if (await isVCancellationRequested(cancellationToken)) {
       return [];
     }
 
@@ -67,8 +74,20 @@ export class VueInterpolationMode implements LanguageMode {
       document.getText()
     );
 
-    const { templateService, templateSourceMap } = this.serviceHost.updateCurrentVirtualVueTextDocument(templateDoc);
+    const childComponents = this.config.vetur.validation.templateProps
+      ? this.vueInfoService && this.vueInfoService.getInfo(document)?.componentInfo.childComponents
+      : [];
+
+    const { templateService, templateSourceMap } = this.serviceHost.updateCurrentVirtualVueTextDocument(
+      templateDoc,
+      childComponents
+    );
+
     if (!languageServiceIncludesFile(templateService, templateDoc.uri)) {
+      return [];
+    }
+
+    if (await isVCancellationRequested(cancellationToken)) {
       return [];
     }
 
@@ -84,7 +103,7 @@ export class VueInterpolationMode implements LanguageMode {
       return {
         range: mapBackRange(templateDoc, diag as ts.TextSpan, templateSourceMap),
         severity: DiagnosticSeverity.Error,
-        message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+        message: this.tsModule.flattenDiagnosticMessageText(diag.messageText, '\n'),
         code: diag.code,
         source: 'Vetur'
       };
@@ -135,16 +154,27 @@ export class VueInterpolationMode implements LanguageMode {
     const mappedOffset = mapFromPositionToOffset(templateDoc, completionPos, templateSourceMap);
     const templateFileFsPath = getFileFsPath(templateDoc.uri);
 
-    const completions = templateService.getCompletionsAtPosition(templateFileFsPath, mappedOffset, {
-      includeCompletionsWithInsertText: true,
-      includeCompletionsForModuleExports: false
-    });
+    /**
+     * A lot of times interpolation expressions aren't valid
+     * TODO: Make sure interpolation expression, even incomplete, can generate incomplete
+     * TS files that can be fed into language service
+     */
+    let completions: ts.WithMetadata<ts.CompletionInfo> | undefined;
+    try {
+      completions = templateService.getCompletionsAtPosition(templateFileFsPath, mappedOffset, {
+        includeCompletionsWithInsertText: true,
+        includeCompletionsForModuleExports: false
+      });
+    } catch (err) {
+      console.log('Interpolation completion failed');
+      console.error(err.toString());
+    }
 
     if (!completions) {
       return NULL_COMPLETION;
     }
 
-    const tsItems = completions.entries.map((entry, index) => {
+    const tsItems = completions!.entries.map((entry, index) => {
       return {
         uri: templateDoc.uri,
         position,
@@ -209,11 +239,11 @@ export class VueInterpolationMode implements LanguageMode {
     );
 
     if (details) {
-      item.detail = Previewer.plain(ts.displayPartsToString(details.displayParts));
+      item.detail = Previewer.plain(this.tsModule.displayPartsToString(details.displayParts));
 
       const documentation: MarkupContent = {
         kind: 'markdown',
-        value: ts.displayPartsToString(details.documentation) + '\n\n'
+        value: this.tsModule.displayPartsToString(details.documentation) + '\n\n'
       };
 
       if (details.tags) {

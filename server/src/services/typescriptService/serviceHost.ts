@@ -1,14 +1,13 @@
-import * as path from 'path';
-import * as ts from 'typescript';
+import path from 'path';
+import type ts from 'typescript';
 import { URI } from 'vscode-uri';
-import { TextDocument } from 'vscode-languageserver-types';
-import * as parseGitIgnore from 'parse-gitignore';
+import { TextDocument } from 'vscode-languageserver-textdocument';
+import parseGitIgnore from 'parse-gitignore';
 
 import { LanguageModelCache } from '../../embeddedSupport/languageModelCache';
 import { createUpdater, parseVueScript } from './preprocess';
 import { getFileFsPath, getFilePath, normalizeFileNameToFsPath } from '../../utils/paths';
 import * as bridge from './bridge';
-import { T_TypeScript } from '../../services/dependencyService';
 import { getVueSys } from './vueSys';
 import { TemplateSourceMap, stringifySourceMapNodes } from './sourceMap';
 import { isVirtualVueTemplateFile, isVueFile } from './util';
@@ -16,18 +15,28 @@ import { logger } from '../../log';
 import { ModuleResolutionCache } from './moduleResolutionCache';
 import { globalScope } from './transformTemplate';
 import { inferVueVersion, VueVersion } from './vueVersion';
+import { ChildComponent } from '../vueInfoService';
+import { RuntimeLibrary } from '../dependencyService';
 
 const NEWLINE = process.platform === 'win32' ? '\r\n' : '\n';
 
-function patchTS(tsModule: T_TypeScript) {
+/**
+ * For prop validation
+ */
+const allChildComponentsInfo = new Map<string, ChildComponent[]>();
+
+function patchTS(tsModule: RuntimeLibrary['typescript']) {
   // Patch typescript functions to insert `import Vue from 'vue'` and `new Vue` around export default.
   // NOTE: this is a global hack that all ts instances after is changed
-  const { createLanguageServiceSourceFile, updateLanguageServiceSourceFile } = createUpdater(tsModule);
+  const { createLanguageServiceSourceFile, updateLanguageServiceSourceFile } = createUpdater(
+    tsModule,
+    allChildComponentsInfo
+  );
   (tsModule as any).createLanguageServiceSourceFile = createLanguageServiceSourceFile;
   (tsModule as any).updateLanguageServiceSourceFile = updateLanguageServiceSourceFile;
 }
 
-function getDefaultCompilerOptions(tsModule: T_TypeScript) {
+function getDefaultCompilerOptions(tsModule: RuntimeLibrary['typescript']) {
   const defaultCompilerOptions: ts.CompilerOptions = {
     allowNonTsExtensions: true,
     allowJs: true,
@@ -48,7 +57,8 @@ export const templateSourceMap: TemplateSourceMap = {};
 export interface IServiceHost {
   queryVirtualFileInfo(fileName: string, currFileText: string): { source: string; sourceMapNodesString: string };
   updateCurrentVirtualVueTextDocument(
-    doc: TextDocument
+    doc: TextDocument,
+    childComponents?: ChildComponent[]
   ): {
     templateService: ts.LanguageService;
     templateSourceMap: TemplateSourceMap;
@@ -60,6 +70,8 @@ export interface IServiceHost {
     scriptDoc: TextDocument;
   };
   updateExternalDocument(filePath: string): void;
+  getFileNames(): string[];
+  getComplierOptions(): ts.CompilerOptions;
   dispose(): void;
 }
 
@@ -72,7 +84,7 @@ export interface IServiceHost {
  * - `js/ts` files in `node_modules`
  */
 export function getServiceHost(
-  tsModule: T_TypeScript,
+  tsModule: RuntimeLibrary['typescript'],
   workspacePath: string,
   updatedScriptRegionDocuments: LanguageModelCache<TextDocument>
 ): IServiceHost {
@@ -80,6 +92,7 @@ export function getServiceHost(
 
   let currentScriptDoc: TextDocument;
 
+  let projectVersion = 1;
   const versions = new Map<string, number>();
   const localScriptRegionDocuments = new Map<string, TextDocument>();
   const nodeModuleSnapshots = new Map<string, ts.IScriptSnapshot>();
@@ -98,7 +111,7 @@ export function getServiceHost(
 
   const vueSys = getVueSys(tsModule, scriptFileNameSet);
 
-  const vueVersion = inferVueVersion(tsModule, workspacePath);
+  const vueVersion = inferVueVersion(workspacePath);
   const compilerOptions = {
     ...getDefaultCompilerOptions(tsModule),
     ...parsedConfig.options
@@ -130,7 +143,7 @@ export function getServiceHost(
     };
   }
 
-  function updateCurrentVirtualVueTextDocument(doc: TextDocument) {
+  function updateCurrentVirtualVueTextDocument(doc: TextDocument, childComponents?: ChildComponent[]) {
     const fileFsPath = getFileFsPath(doc.uri);
     const filePath = getFilePath(doc.uri);
     // When file is not in language service, add it
@@ -143,7 +156,11 @@ export function getServiceHost(
     if (isVirtualVueTemplateFile(fileFsPath)) {
       localScriptRegionDocuments.set(fileFsPath, doc);
       scriptFileNameSet.add(filePath);
+      if (childComponents) {
+        allChildComponentsInfo.set(filePath, childComponents);
+      }
       versions.set(fileFsPath, (versions.get(fileFsPath) || 0) + 1);
+      projectVersion++;
     }
 
     return {
@@ -173,6 +190,7 @@ export function getServiceHost(
       localScriptRegionDocuments.set(fileFsPath, currentScriptDoc);
       scriptFileNameSet.add(filePath);
       versions.set(fileFsPath, (versions.get(fileFsPath) || 0) + 1);
+      projectVersion++;
     }
     return {
       service: jsLanguageService,
@@ -182,8 +200,22 @@ export function getServiceHost(
 
   // External Documents: JS/TS, non Vue documents
   function updateExternalDocument(fileFsPath: string) {
+    // respect tsconfig
+    // use *internal* function
+    const configFileSpecs = (parsedConfig as any).configFileSpecs;
+    const isExcludedFile = (tsModule as any).isExcludedFile;
+    if (
+      isExcludedFile &&
+      configFileSpecs &&
+      isExcludedFile(fileFsPath, configFileSpecs, workspacePath, true, workspacePath)
+    ) {
+      return;
+    }
+    logger.logInfo(`update ${fileFsPath} in ts language service.`);
+
     const ver = versions.get(fileFsPath) || 0;
     versions.set(fileFsPath, ver + 1);
+    projectVersion++;
 
     // Clear cache so we read the js/ts file from file system again
     if (projectFileSnapshots.has(fileFsPath)) {
@@ -191,8 +223,13 @@ export function getServiceHost(
     }
   }
 
+  function getFileNames() {
+    return Array.from(scriptFileNameSet);
+  }
+
   function createLanguageServiceHost(options: ts.CompilerOptions): ts.LanguageServiceHost {
     return {
+      getProjectVersion: () => projectVersion.toString(),
       getCompilationSettings: () => options,
       getScriptFileNames: () => Array.from(scriptFileNameSet),
       getScriptVersion(fileName) {
@@ -258,7 +295,10 @@ export function getServiceHost(
           if (name === bridge.moduleName) {
             return {
               resolvedFileName: bridge.fileName,
-              extension: tsModule.Extension.Ts
+              extension: tsModule.Extension.Ts,
+              /* tslint:disable:max-line-length */
+              // https://github.com/microsoft/TypeScript/blob/bcbe1d763823eacd4b252c904e77761a6b8636a1/src/compiler/types.ts#L6216
+              isExternalLibraryImport: true
             };
           }
           const cachedResolvedModule = moduleResolutionCache.getCache(name, containingFile);
@@ -415,6 +455,8 @@ export function getServiceHost(
     updateCurrentVirtualVueTextDocument,
     updateCurrentVueTextDocument,
     updateExternalDocument,
+    getFileNames,
+    getComplierOptions: () => compilerOptions,
     dispose: () => {
       jsLanguageService.dispose();
     }
@@ -448,7 +490,7 @@ function patchTemplateService(original: ts.LanguageService): ts.LanguageService 
   };
 }
 
-function defaultIgnorePatterns(tsModule: T_TypeScript, workspacePath: string) {
+function defaultIgnorePatterns(tsModule: RuntimeLibrary['typescript'], workspacePath: string) {
   const nodeModules = ['node_modules', '**/node_modules/*'];
   const gitignore = tsModule.findConfigFile(workspacePath, tsModule.sys.fileExists, '.gitignore');
   if (!gitignore) {
@@ -459,7 +501,7 @@ function defaultIgnorePatterns(tsModule: T_TypeScript, workspacePath: string) {
   return nodeModules.concat(filtered);
 }
 
-function getScriptKind(tsModule: T_TypeScript, langId: string): ts.ScriptKind {
+function getScriptKind(tsModule: RuntimeLibrary['typescript'], langId: string): ts.ScriptKind {
   return langId === 'typescript'
     ? tsModule.ScriptKind.TS
     : langId === 'tsx'
@@ -467,7 +509,7 @@ function getScriptKind(tsModule: T_TypeScript, langId: string): ts.ScriptKind {
     : tsModule.ScriptKind.JS;
 }
 
-function getParsedConfig(tsModule: T_TypeScript, workspacePath: string) {
+function getParsedConfig(tsModule: RuntimeLibrary['typescript'], workspacePath: string) {
   const configFilename =
     tsModule.findConfigFile(workspacePath, tsModule.sys.fileExists, 'tsconfig.json') ||
     tsModule.findConfigFile(workspacePath, tsModule.sys.fileExists, 'jsconfig.json');
@@ -489,7 +531,7 @@ function getParsedConfig(tsModule: T_TypeScript, workspacePath: string) {
         // Note: in order for parsed config to include *.vue files, scriptKind must be set to Deferred.
         // tslint:disable-next-line max-line-length
         // See: https://github.com/microsoft/TypeScript/blob/2106b07f22d6d8f2affe34b9869767fa5bc7a4d9/src/compiler/utilities.ts#L6356
-        scriptKind: ts.ScriptKind.Deferred
+        scriptKind: tsModule.ScriptKind.Deferred
       }
     ]
   );

@@ -1,20 +1,23 @@
-import * as ts from 'typescript';
-import * as path from 'path';
+import type ts from 'typescript';
+import path from 'path';
 import { parse } from 'vue-eslint-parser';
 
 import { URI } from 'vscode-uri';
 import { getVueDocumentRegions } from '../../embeddedSupport/embeddedSupport';
-import { TextDocument } from 'vscode-languageserver-types';
-import { T_TypeScript } from '../../services/dependencyService';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import {
   getTemplateTransformFunctions,
   componentHelperName,
   iterationHelperName,
-  renderHelperName
+  renderHelperName,
+  componentDataName
 } from './transformTemplate';
 import { templateSourceMap } from './serviceHost';
 import { generateSourceMap } from './sourceMap';
 import { isVirtualVueTemplateFile, isVueFile } from './util';
+import { ChildComponent } from '../vueInfoService';
+import { kebabCase, snakeCase } from 'lodash';
+import { RuntimeLibrary } from '../dependencyService';
 
 const importedComponentName = '__vlsComponent';
 
@@ -47,7 +50,10 @@ export function parseVueTemplate(text: string): string {
   return rawText.replace(/ {10}/, '<template>') + '</template>';
 }
 
-export function createUpdater(tsModule: T_TypeScript) {
+export function createUpdater(
+  tsModule: RuntimeLibrary['typescript'],
+  allChildComponentsInfo: Map<string, ChildComponent[]>
+) {
   const clssf = tsModule.createLanguageServiceSourceFile;
   const ulssf = tsModule.updateLanguageServiceSourceFile;
   const scriptKindTracker = new WeakMap<ts.SourceFile, ts.ScriptKind | undefined>();
@@ -80,7 +86,7 @@ export function createUpdater(tsModule: T_TypeScript) {
    * The transformed TS AST has synthetic nodes so language features would fail on them
    * Use printer to print the AST as re-parse the source to get a valid SourceFile
    */
-  function recreateVueTempalteSourceFile(
+  function recreateVueTemplateSourceFile(
     vueTemplateFileName: string,
     sourceFile: ts.SourceFile,
     scriptSnapshot: ts.IScriptSnapshot
@@ -92,16 +98,25 @@ export function createUpdater(tsModule: T_TypeScript) {
     const scriptSrc = parseVueScriptSrc(vueText);
     const program = parse(templateCode, { sourceType: 'module' });
 
+    const childComponentNames = allChildComponentsInfo.get(vueTemplateFileName)?.map(c => snakeCase(c.name));
     let expressions: ts.Expression[] = [];
     try {
-      expressions = getTemplateTransformFunctions(tsModule).transformTemplate(program, templateCode);
+      expressions = getTemplateTransformFunctions(tsModule, childComponentNames).transformTemplate(
+        program,
+        templateCode
+      );
       injectVueTemplate(tsModule, sourceFile, expressions, scriptSrc);
     } catch (err) {
       console.log(`Failed to transform template of ${vueTemplateFileName}`);
       console.log(err);
     }
 
-    const newText = printer.printFile(sourceFile);
+    let newText = printer.printFile(sourceFile);
+
+    if (allChildComponentsInfo.has(vueTemplateFileName)) {
+      const childComponents = allChildComponentsInfo.get(vueTemplateFileName)!;
+      newText += convertChildComponentsInfoToSource(childComponents);
+    }
 
     const newSourceFile = tsModule.createSourceFile(
       vueTemplateFileName,
@@ -110,6 +125,14 @@ export function createUpdater(tsModule: T_TypeScript) {
       true /* setParentNodes: Need this to walk the AST */,
       tsModule.ScriptKind.JS
     );
+    // Assign version to the new template sourceFile to avoid re-processing
+    // *internal* property
+    (newSourceFile as any).version = (sourceFile as any).version;
+    (newSourceFile as any).scriptSnapshot = {
+      getText: (start: number, end: number) => newText.substring(start, end),
+      getLength: () => newText.length,
+      getChangeRange: () => void 0
+    };
 
     const templateFsPath = URI.file(vueTemplateFileName).fsPath;
     const sourceMapNodes = generateSourceMap(tsModule, sourceFile, newSourceFile);
@@ -130,7 +153,7 @@ export function createUpdater(tsModule: T_TypeScript) {
     let sourceFile = clssf(fileName, scriptSnapshot, scriptTarget, version, setNodeParents, scriptKind);
     scriptKindTracker.set(sourceFile, scriptKind);
     if (isVirtualVueTemplateFile(fileName)) {
-      sourceFile = recreateVueTempalteSourceFile(fileName, sourceFile, scriptSnapshot);
+      sourceFile = recreateVueTemplateSourceFile(fileName, sourceFile, scriptSnapshot);
       modificationTracker.add(sourceFile);
     } else {
       modifySourceFile(fileName, sourceFile, scriptSnapshot, version, scriptKind);
@@ -148,7 +171,7 @@ export function createUpdater(tsModule: T_TypeScript) {
     const scriptKind = scriptKindTracker.get(sourceFile);
     sourceFile = ulssf(sourceFile, scriptSnapshot, version, textChangeRange, aggressiveChecks);
     if (isVirtualVueTemplateFile(sourceFile.fileName)) {
-      sourceFile = recreateVueTempalteSourceFile(sourceFile.fileName, sourceFile, scriptSnapshot);
+      sourceFile = recreateVueTemplateSourceFile(sourceFile.fileName, sourceFile, scriptSnapshot);
       modificationTracker.add(sourceFile);
     } else {
       modifySourceFile(sourceFile.fileName, sourceFile, scriptSnapshot, version, scriptKind);
@@ -162,12 +185,12 @@ export function createUpdater(tsModule: T_TypeScript) {
   };
 }
 
-function modifyVueScript(tsModule: T_TypeScript, sourceFile: ts.SourceFile): void {
+function modifyVueScript(tsModule: RuntimeLibrary['typescript'], sourceFile: ts.SourceFile): void {
   const exportDefaultObject = sourceFile.statements.find(
     st =>
       st.kind === tsModule.SyntaxKind.ExportAssignment &&
       (st as ts.ExportAssignment).expression.kind === tsModule.SyntaxKind.ObjectLiteralExpression
-  );
+  ) as ts.ExportAssignment;
   if (exportDefaultObject) {
     // 1. add `import Vue from 'vue'
     // (the span of the inserted statement must be (0,0) to avoid overlapping existing statements)
@@ -192,7 +215,7 @@ function modifyVueScript(tsModule: T_TypeScript, sourceFile: ts.SourceFile): voi
       end: objectLiteral.pos + 1
     });
     (exportDefaultObject as any).expression = setObjPos(tsModule.createCall(vue, undefined, [objectLiteral]));
-    setObjPos(((exportDefaultObject as ts.ExportAssignment).expression as ts.CallExpression).arguments!);
+    setObjPos((exportDefaultObject.expression as ts.CallExpression).arguments!);
   }
 }
 
@@ -201,7 +224,7 @@ function modifyVueScript(tsModule: T_TypeScript, sourceFile: ts.SourceFile): voi
  * to validate its types
  */
 export function injectVueTemplate(
-  tsModule: T_TypeScript,
+  tsModule: RuntimeLibrary['typescript'],
   sourceFile: ts.SourceFile,
   renderBlock: ts.Expression[],
   scriptSrc?: string
@@ -235,7 +258,8 @@ export function injectVueTemplate(
       tsModule.createNamedImports([
         tsModule.createImportSpecifier(undefined, tsModule.createIdentifier(renderHelperName)),
         tsModule.createImportSpecifier(undefined, tsModule.createIdentifier(componentHelperName)),
-        tsModule.createImportSpecifier(undefined, tsModule.createIdentifier(iterationHelperName))
+        tsModule.createImportSpecifier(undefined, tsModule.createIdentifier(iterationHelperName)),
+        tsModule.createImportSpecifier(undefined, tsModule.createIdentifier(componentDataName))
       ])
     ),
     tsModule.createLiteral('vue-editor-bridge')
@@ -272,8 +296,49 @@ export function injectVueTemplate(
 
 /** Create a function that calls setTextRange on synthetic wrapper nodes that need a valid range */
 function getWrapperRangeSetter(
-  tsModule: T_TypeScript,
+  tsModule: RuntimeLibrary['typescript'],
   wrapped: ts.TextRange
 ): <T extends ts.TextRange>(wrapperNode: T) => T {
   return wrapperNode => tsModule.setTextRange(wrapperNode, wrapped);
+}
+
+function convertChildComponentsInfoToSource(childComponents: ChildComponent[]) {
+  let src = '';
+  childComponents.forEach(c => {
+    const componentDataInterfaceName = componentDataName + '__' + snakeCase(c.name);
+    const componentHelperInterfaceName = componentHelperName + '__' + snakeCase(c.name);
+
+    const propTypeStrings: string[] = [];
+    c.info?.componentInfo.props?.forEach(p => {
+      let typeKey = kebabCase(p.name);
+      if (typeKey.includes('-')) {
+        typeKey = `'` + typeKey + `'`;
+      }
+      if (!p.required) {
+        typeKey += '?';
+      }
+
+      if (p.typeString) {
+        propTypeStrings.push(`${typeKey}: ${p.typeString}`);
+      } else {
+        propTypeStrings.push(`${typeKey}: any`);
+      }
+    });
+    propTypeStrings.push('[other: string]: any');
+
+    src += `
+interface ${componentDataInterfaceName}<T> extends ${componentDataName}<T> {
+  props: { ${propTypeStrings.join(', ')} }
+}
+declare const ${componentHelperInterfaceName}: {
+  <T>(
+    vm: T,
+    tag: string,
+    data: ${componentDataInterfaceName}<Record<string, any>> & ThisType<T>,
+    children: any[]
+  ): any
+}`;
+  });
+
+  return src;
 }

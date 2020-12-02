@@ -4,27 +4,26 @@
   "description": "Vue tooling for VS Code",
   "author": "Pine Wu <octref@gmail.com>",
   "icon": "asset/vue.png",
-  "version": "0.27.2",
+  "version": "0.30.3",
   "publisher": "octref",
   "scripts": {
     "postinstall": "run-s install:*",
     "install:server": "cd server && yarn",
     "install:vti": "cd vti && yarn",
-    "build:grammar": "tsc -p . && node dist/scripts/build_grammar",
-    "compile": "run-s compile:source copy:snippets",
-    "compile:source": "tsc -b .",
-    "watch": "run-s compile copy:snippets watch:build",
-    "watch:build": "tsc -b -w .",
-    "copy:snippets": "node ./build/copy-snippets.js",
+    "build:grammar": "ts-node --project scripts/tsconfig.json scripts/build_grammar",
+    "compile": "rollup -c rollup.config.js",
+    "watch": "rollup -c rollup.config.js -w",
     "lint": "tslint -c tslint.json client/**/*.ts server/**/*.ts scripts/**/*.ts",
-    "test:server": "yarn compile && cd server && yarn test",
-    "test:e2e": "node ./dist/test/codeTestRunner.js",
-    "test:grammar": "node ./dist/test/codeTestRunner.js grammar",
-    "test:lsp": "node ./dist/test/codeTestRunner.js lsp",
-    "test:int": "node ./dist/test/codeTestRunner.js interpolation",
-    "test:vue3": "node ./dist/test/codeTestRunner.js vue3",
-    "test:componentData": "node ./dist/test/codeTestRunner.js componentData",
-    "test": "run-s compile test:server test:e2e",
+    "build:test": "tsc -p test/tsconfig.json",
+    "pretest": "yarn build:test",
+    "test:server": "cd server && yarn test",
+    "test:e2e": "node ./dist-test/test/codeTestRunner.js",
+    "test:grammar": "node ./dist-test/test/codeTestRunner.js grammar",
+    "test:lsp": "node ./dist-test/test/codeTestRunner.js lsp",
+    "test:int": "node ./dist-test/test/codeTestRunner.js interpolation",
+    "test:vue3": "node ./dist-test/test/codeTestRunner.js vue3",
+    "test:componentData": "node ./dist-test/test/codeTestRunner.js componentData",
+    "test": "run-s test:server test:e2e",
     "docs": "bash ./build/update-docs.sh",
     "prepare-publish": "./build/release-cleanup.sh"
   },
@@ -57,16 +56,16 @@
   "engines": {
     "vscode": "^1.47.0"
   },
-  "dependencies": {
-    "vscode-languageclient": "^6.1.3",
-    "vscode-languageserver-types": "^3.15.1"
-  },
   "activationEvents": [
     "onLanguage:vue"
   ],
-  "main": "./dist/client/vueMain",
+  "main": "./dist/vueMain.js",
   "contributes": {
     "commands": [
+      {
+        "command": "vetur.restartVLS",
+        "title": "Vetur: Restart VLS (Vue Language Server)"
+      },
       {
         "command": "vetur.generateGrammar",
         "title": "Vetur: Generate grammar from `vetur.grammar.customBlocks`"
@@ -125,6 +124,7 @@
           "text.jade.slm": "slm",
           "text.pug": "jade",
           "text.haml": "haml",
+          "text.slim": "slim",
           "text.html.liquid": "liquid",
           "source.css": "css",
           "source.css.scss": "scss",
@@ -249,7 +249,7 @@
         "vetur.validation.templateProps": {
           "type": "boolean",
           "default": false,
-          "description": "Validate props usage in <template> region. Show error/warning for not passing declared props to child components."
+          "description": "Validate props usage in <template> region. Show error/warning for not passing declared props to child components and show error for passing wrongly typed interpolation expressions"
         },
         "vetur.validation.interpolation": {
           "type": "boolean",
@@ -283,7 +283,7 @@
         },
         "vetur.format.defaultFormatter.html": {
           "type": "string",
-          "default": "prettyhtml",
+          "default": "prettier",
           "enum": [
             "none",
             "prettyhtml",
@@ -292,7 +292,7 @@
           ],
           "enumDescriptions": [
             "disable formatting",
-            "prettyhtml",
+            "🚧 [DEPRECATED] prettyhtml",
             "html formatter of js-beautify",
             "prettier"
           ],
@@ -484,6 +484,11 @@
           "default": false,
           "description": "Whether to have initial indent for <script> region"
         },
+        "vetur.languageFeatures.codeActions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to enable codeActions"
+        },
         "vetur.trace.server": {
           "type": "string",
           "enum": [
@@ -526,28 +531,39 @@
     }
   },
   "devDependencies": {
+    "@rollup/plugin-commonjs": "^16.0.0",
+    "@rollup/plugin-json": "^4.1.0",
+    "@rollup/plugin-node-resolve": "^10.0.0",
+    "@rollup/plugin-replace": "^2.3.3",
     "@types/glob": "^7.1.3",
     "@types/js-yaml": "^3.12.5",
-    "@types/lodash": "^4.14.161",
-    "@types/minimist": "^1.2.0",
-    "@types/mocha": "^8.0.3",
-    "@types/node": "^14.6.4",
+    "@types/lodash": "^4.14.163",
+    "@types/minimist": "^1.2.1",
+    "@types/mocha": "^8.0.4",
+    "@types/node": "^14.14.10",
     "@types/shelljs": "^0.8.8",
     "@types/vscode": "^1.47.0",
+    "esbuild": "^0.8.15",
     "fs-extra": "^9.0.1",
     "glob": "^7.1.6",
-    "husky": "^4.2.5",
+    "husky": "^4.3.0",
     "js-yaml": "^3.14.0",
-    "lint-staged": "^10.3.0",
+    "lint-staged": "^10.5.2",
     "minimist": "^1.2.5",
-    "mocha": "^8.1.3",
-    "ncp": "^2.0.0",
+    "mocha": "^8.2.1",
     "npm-run-all": "^4.1.5",
-    "prettier": "^2.1.1",
-    "rimraf": "^3.0.2",
+    "prettier": "^2.2.0",
+    "rollup": "^2.33.3",
+    "rollup-plugin-delete": "^2.0.0",
+    "rollup-plugin-dts": "^2.0.0",
+    "rollup-plugin-terser": "^7.0.2",
+    "rollup-plugin-typescript2": "^0.29.0",
     "shelljs": "^0.8.4",
+    "ts-node": "^9.0.0",
     "tslint": "^6.1.3",
-    "typescript": "^4.0.2",
-    "vscode-test": "^1.4.0"
+    "typescript": "^4.1.2",
+    "vscode-languageclient": "^6.1.3",
+    "vscode-languageserver-types": "^3.15.1",
+    "vscode-test": "^1.4.1"
   }
 }

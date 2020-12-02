@@ -1,10 +1,12 @@
-import { TextDocument, Position, Range } from 'vscode-languageserver-types';
+import { Position, Range } from 'vscode-languageserver-types';
+import type { TextDocument } from 'vscode-languageserver-textdocument';
 import { LanguageMode } from '../../embeddedSupport/languageModes';
-import { prettierify } from '../../utils/prettier';
+import { prettierPluginPugify } from '../../utils/prettier';
 import { VLSFormatConfig } from '../../config';
 import { getFileFsPath } from '../../utils/paths';
+import { DependencyService } from '../../services/dependencyService';
 
-export function getPugMode(): LanguageMode {
+export function getPugMode(dependencyService: DependencyService): LanguageMode {
   let config: any = {};
 
   return {
@@ -21,16 +23,16 @@ export function getPugMode(): LanguageMode {
 
       const { value, range } = getValueAndRange(document, currRange);
 
-      const foo = prettierify(
+      return prettierPluginPugify(
+        dependencyService,
         value,
         getFileFsPath(document.uri),
         range,
         config.vetur.format as VLSFormatConfig,
+        // @ts-expect-error
         'pug',
         false
       );
-
-      return foo;
     },
     onDocumentRemoved() {},
     dispose() {}
